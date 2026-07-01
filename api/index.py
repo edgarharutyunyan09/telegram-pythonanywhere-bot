@@ -6,7 +6,6 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-
 @app.route("/api/health")
 @app.route("/api/index")
 def health():
@@ -77,6 +76,7 @@ def webhook():
 
 # Module-level flag so the WEBHOOK_SECRET unset warning logs once per
 # worker boot instead of on every request.
+
 _WARNED_NO_WEBHOOK_SECRET = [False]
 
 
@@ -113,7 +113,7 @@ def deploy():
     """Auto-deploy webhook. Pulls the latest commit and reloads the PA worker.
 
     Verifies an X-Deploy-Secret header against DEPLOY_SECRET. Fail-closed:
-    returns 403 if the env var is unset, so a misconfigured deploy can't
+    returns 403 if the env var is unset, so a misconfigured deployment can't
     accidentally allow arbitrary callers to trigger code execution.
 
     Serialized via fcntl.flock so overlapping GitHub Actions runs or
@@ -157,7 +157,7 @@ def deploy():
 
         # Re-register webhook in case WEBHOOK_URL or WEBHOOK_SECRET
         # changed, or a local polling session cleared the registration.
-        # Best-effort: never fail the deploy on a webhook registration
+        # Best-effort: never fail the deployment on a webhook registration
         # error since the worker reload below will retry it.
         webhook_status = ""
         try:
@@ -169,7 +169,7 @@ def deploy():
 
         # Touch the PA WSGI file so the next request boots a fresh
         # worker with the new code. No-op when not running on PA;
-        # don't fail the deploy if the touch itself errors (the pull
+        # don't fail the deployment if the touch itself errors (the pull
         # already succeeded).
         wsgi_path = _pa_wsgi_path()
         if wsgi_path:

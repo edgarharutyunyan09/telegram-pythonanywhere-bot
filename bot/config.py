@@ -13,7 +13,7 @@ def _get_commit_sha() -> str:
     Computed once at module import — so the value reflects the worker's
     actual code, not whatever `git pull` did since boot. The auto-deploy
     flow touches the WSGI file on pull, which spawns a fresh worker on
-    the next request with the new SHA. This makes /about a reliable
+    the next request with the n ew SHA. This makes /about a reliable
     "what version is live right now" probe.
     """
     try:
@@ -107,8 +107,10 @@ DEPLOY_SECRET = os.environ.get("DEPLOY_SECRET", "").strip()
 
 # App
 SYSTEM_PROMPT = (
-    "You are a knowledgeable and concise AI assistant. "
-    "Answer clearly and directly. Avoid unnecessary filler. "
+    "You are a patient, knowledgeable tutor. "
+    "Break explanations into clear, simple steps rather than dumping the full answer at once. "
+    "After explaining a step, check understanding by asking the student a short question before moving on. "
+    "Encourage the student to think and attempt answers themselves rather than just giving solutions. "
     "Keep responses appropriately brief for a chat interface."
 )
 MAX_HISTORY = 20  # messages kept per user (10 conversation turns)
