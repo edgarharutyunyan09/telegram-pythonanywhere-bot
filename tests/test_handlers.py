@@ -1,3 +1,5 @@
+import pathlib
+import re
 from unittest.mock import patch, MagicMock
 
 
@@ -113,6 +115,35 @@ def test_handle_message_mention_only_skipped():
         msg = make_message(text="@testbot")
         handle_message(msg)
         mock_ask.assert_not_called()
+
+
+# ── /help ─────────────────────────────────────────────────────────────────────
+
+
+def test_help_lists_every_registered_command():
+    """/help must document every command handler. Scans the source for each
+    @bot.message_handler(commands=[...]) and asserts it appears in the help
+    text — a drift guard so new commands can't be added without listing them.
+
+    /model is excluded: it's only registered when HF_SPACE_ID is set, and
+    cmd_help lists it under that same condition."""
+    src = pathlib.Path("bot/handlers.py").read_text(encoding="utf-8")
+    registered = set(re.findall(r'commands=\["([a-z0-9_]+)"\]', src))
+    registered.discard("help")  # listed as "/help " (padded), matched below
+    registered.discard("model")  # conditional on HF_SPACE_ID
+
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.HF_SPACE_ID", ""),
+    ):
+        from bot.handlers import cmd_help
+
+        cmd_help(make_message())
+        help_text = mock_bot.send_message.call_args[0][1]
+
+    assert "/help" in help_text
+    missing = [c for c in registered if f"/{c}" not in help_text]
+    assert not missing, f"/help is missing commands: {missing}"
 
 
 # ── /about ────────────────────────────────────────────────────────────────────
