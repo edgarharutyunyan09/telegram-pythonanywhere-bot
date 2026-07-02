@@ -146,6 +146,29 @@ def test_help_lists_every_registered_command():
     assert not missing, f"/help is missing commands: {missing}"
 
 
+def test_telegram_commands_cover_all_registered():
+    """The Telegram command menu (set_my_commands) must include every command
+    handler, so the '/' menu users see stays in sync with what actually works."""
+    src = pathlib.Path("bot/handlers.py").read_text(encoding="utf-8")
+    registered = set(re.findall(r'commands=\["([a-z0-9_]+)"\]', src))
+    registered.discard("model")  # conditional on HF_SPACE_ID
+
+    from bot.handlers import telegram_commands
+
+    names = {name for name, _desc in telegram_commands()}
+    assert not (registered - names), f"command menu missing: {registered - names}"
+
+
+def test_register_commands_pushes_to_telegram():
+    """register_commands() must call Telegram's set_my_commands."""
+    with patch("bot.clients.bot") as mock_bot:
+        from bot.clients import register_commands
+
+        msg = register_commands()
+        mock_bot.set_my_commands.assert_called_once()
+        assert "Registered" in msg
+
+
 # ── /about ────────────────────────────────────────────────────────────────────
 
 

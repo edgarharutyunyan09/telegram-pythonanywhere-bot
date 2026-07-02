@@ -60,6 +60,8 @@ from api.index import app as application  # noqa: E402, F401
 # unset (e.g. local dev). Logged so the result shows up in PA's
 # server.log. Imported here (not at module top) so api/index.py's
 # Flask app finishes setup first.
-from bot.clients import register_webhook  # noqa: E402
+from bot.clients import register_commands, register_webhook  # noqa: E402
 
 print(register_webhook())
+# Push the command menu to Telegram so the "/" menu lists every command.
+print(register_commands())

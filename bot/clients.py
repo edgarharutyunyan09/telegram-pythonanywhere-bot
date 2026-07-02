@@ -131,3 +131,25 @@ def register_webhook() -> str:
     if result is False:
         return f"Webhook registration: Telegram returned False for {WEBHOOK_URL}"
     return f"Webhook registered: {WEBHOOK_URL}"
+
+
+def register_commands() -> str:
+    """Register the command menu with Telegram via set_my_commands.
+
+    Populates the "/" command menu users see in their Telegram client — this is
+    separate from the /help text and must be pushed explicitly. Idempotent and
+    best-effort: never raises, so a network blip can't crash worker boot.
+
+    bot.handlers is imported lazily inside the function to avoid a module-load
+    import cycle (handlers imports this module at its top).
+    """
+    try:
+        from telebot.types import BotCommand
+
+        from bot.handlers import telegram_commands
+
+        cmds = [BotCommand(name, desc) for name, desc in telegram_commands()]
+        bot.set_my_commands(cmds)
+        return f"Registered {len(cmds)} bot commands with Telegram"
+    except Exception as e:
+        return f"Command registration failed: {e}"

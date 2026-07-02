@@ -187,9 +187,11 @@ def deploy():
         # error since the worker reload below will retry it.
         webhook_status = ""
         try:
-            from bot.clients import register_webhook
+            from bot.clients import register_commands, register_webhook
 
             webhook_status = "\n" + register_webhook()
+            # Refresh the Telegram command menu in case commands changed.
+            webhook_status += "\n" + register_commands()
         except Exception as e:
             webhook_status = f"\nWebhook registration failed: {e}"
 

@@ -62,32 +62,53 @@ def cmd_start(message):
     )
 
 
-@bot.message_handler(commands=["help"], func=is_allowed)
-def cmd_help(message):
+# Single source of truth for the command list. Used both to render /help and
+# to register Telegram's command menu (set_my_commands) so the two never drift.
+# Each entry is (name, args, description); /model is appended when HF is enabled.
+COMMANDS = [
+    ("start", "", "welcome message"),
+    ("help", "", "show this command list"),
+    ("reset", "", "clear conversation history"),
+    ("about", "", "about this bot"),
+    ("explain", "<topic>", "clear, step-by-step explanation"),
+    ("eli5", "<topic>", "explain like I'm five"),
+    ("quiz", "[topic]", "a multiple-choice question"),
+    ("practice", "[subject]", "get a problem to solve"),
+    ("score", "", "your quiz score"),
+    ("skip", "", "leave the current quiz/practice"),
+    ("joke", "", "one short, clean programming joke"),
+    ("quote", "", "a short motivational line"),
+    ("fact", "", "a short, surprising fact"),
+    ("compliment", "", "brighten someone's day"),
+    ("roast", "[name]", "a short, playful roast"),
+    ("roll", "", "roll a dice (1-6)"),
+    ("remember", "", "save a note"),
+    ("recall", "", "show your saved notes"),
+    ("forget", "", "delete your saved notes"),
+]
+
+
+def _help_lines():
     lines = [
-        "/start — welcome message",
-        "/help  — show this message",
-        "/reset — clear conversation history",
-        "/about — about this bot",
-        "/explain <topic> — clear, step-by-step explanation",
-        "/eli5 <topic> — explain like I'm five",
-        "/quiz [topic] — a multiple-choice question",
-        "/practice [subject] — get a problem to solve",
-        "/score — your quiz score",
-        "/skip — leave the current quiz/practice",
-        "/joke — tell one short, clean programming joke",
-        "/quote — share a short motivational line",
-        "/fact — share a short, surprising fact",
-        "/compliment — brighten someone's day",
-        "/roast [name] — a short, playful roast",
-        "/roll — roll a dice (1-6)",
-        "/remember — save a note",
-        "/recall — show your saved note",
-        "/forget — delete your saved note",
+        f"/{name}{(' ' + args) if args else ''} — {desc}"
+        for name, args, desc in COMMANDS
     ]
     if HF_SPACE_ID:
         lines.append("/model — switch AI provider")
-    bot.send_message(message.chat.id, "\n".join(lines))
+    return lines
+
+
+def telegram_commands():
+    """(name, description) pairs for Telegram's set_my_commands menu."""
+    pairs = [(name, desc) for name, _args, desc in COMMANDS]
+    if HF_SPACE_ID:
+        pairs.append(("model", "switch AI provider"))
+    return pairs
+
+
+@bot.message_handler(commands=["help"], func=is_allowed)
+def cmd_help(message):
+    bot.send_message(message.chat.id, "\n".join(_help_lines()))
 
 
 @bot.message_handler(commands=["reset"], func=is_allowed)
