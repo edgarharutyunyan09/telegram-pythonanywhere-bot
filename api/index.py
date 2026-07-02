@@ -123,6 +123,12 @@ def _pa_wsgi_path() -> str:
 
     Honors PA_WSGI_PATH as an explicit override for non-default PA
     layouts; otherwise derives from $USER.
+
+    The username is lowercased for the filename: PA names the WSGI file from
+    the lowercased domain (e.g. /var/www/edgarharutyunyan_..._wsgi.py) even
+    when the account/home dir preserves mixed case. Touching a mixed-case path
+    silently does nothing — PA watches the lowercase file — so the worker would
+    never reload on deploy.
     """
     override = os.environ.get("PA_WSGI_PATH", "").strip()
     if override:
@@ -130,7 +136,7 @@ def _pa_wsgi_path() -> str:
     user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
     if not user:
         return ""
-    candidate = f"/var/www/{user}_pythonanywhere_com_wsgi.py"
+    candidate = f"/var/www/{user.lower()}_pythonanywhere_com_wsgi.py"
     return candidate if os.path.exists(candidate) else ""
 
 
