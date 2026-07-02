@@ -102,11 +102,18 @@ $CloneUrl = $RepoUrl.Trim()
 if ($CloneUrl -like 'git@github.com:*')        { $CloneUrl = 'https://github.com/' + $CloneUrl.Substring('git@github.com:'.Length) }
 elseif ($CloneUrl -like 'ssh://git@github.com/*') { $CloneUrl = 'https://github.com/' + $CloneUrl.Substring('ssh://git@github.com/'.Length) }
 
+# PA lowercases the username for the served domain and derives the /var/www
+# WSGI filename and /var/log paths from that lowercased domain. The home
+# directory, however, keeps the exact registered case on a case-sensitive
+# filesystem. So use the lowercased form for domain/WSGI/log paths and the
+# original case for /home paths — mixing these up silently writes the WSGI
+# shim to a file PA never reads, and PA then serves its default app (404).
+$PaUserLower         = $PaUsername.ToLower()
 $PaApi               = "https://www.pythonanywhere.com/api/v0/user/$PaUsername"
-$Domain              = "$PaUsername.pythonanywhere.com"
+$Domain              = "$PaUserLower.pythonanywhere.com"
 $ProjectDir          = "/home/$PaUsername/$RepoName"
 $VenvDir             = "/home/$PaUsername/.virtualenvs/telegram-bot"
-$WsgiFile            = "/var/www/${PaUsername}_pythonanywhere_com_wsgi.py"
+$WsgiFile            = "/var/www/${PaUserLower}_pythonanywhere_com_wsgi.py"
 $WebhookUrlResolved  = "https://$Domain/api/webhook"
 $PythonVersion       = 'python313'
 
@@ -120,6 +127,10 @@ Write-Host ""
 # ---- HTTP helper (PA API) ---------------------------------------------------
 # Returns @{ Code; Body }. -SkipHttpErrorCheck keeps 4xx/5xx from throwing so we
 # can branch on the status code (PA returns 403 for a missing web app, etc.).
+# We read the status off the response object ($resp.StatusCode) rather than the
+# -StatusCodeVariable parameter: that parameter does not exist on
+# Invoke-WebRequest (even in PowerShell 7.6), so using it made every call throw
+# and get masked as Code=0 — which surfaced misleadingly as "token rejected".
 function Invoke-Pa {
     param(
         [string]$Method = 'Get',
@@ -134,13 +145,22 @@ function Invoke-Pa {
     if (-not $NoAuth) { $headers['Authorization'] = "Token $PaToken" }
     $p = @{
         Uri = $uri; Method = $Method; Headers = $headers; TimeoutSec = $TimeoutSec
-        SkipHttpErrorCheck = $true; StatusCodeVariable = 'code'
+        SkipHttpErrorCheck = $true
     }
     if ($Form)              { $p.Form = $Body }
-    elseif ($null -ne $Body) { $p.Body = $Body }
+    elseif ($null -ne $Body) {
+        $p.Body = $Body
+        # PowerShell 7's Invoke-WebRequest only auto-sets the form Content-Type
+        # for a hashtable body on POST, not PATCH — leaving it empty makes PA
+        # reject the PATCH with HTTP 415. Set it explicitly for any dictionary
+        # body so form-encoding works across every method.
+        if ($Body -is [System.Collections.IDictionary]) {
+            $p.ContentType = 'application/x-www-form-urlencoded'
+        }
+    }
     try {
         $resp = Invoke-WebRequest @p
-        return [pscustomobject]@{ Code = [int]$code; Body = [string]$resp.Content }
+        return [pscustomobject]@{ Code = [int]$resp.StatusCode; Body = [string]$resp.Content }
     } catch {
         # Network-level failure (DNS, TLS, timeout) — no HTTP status.
         return [pscustomobject]@{ Code = 0; Body = [string]$_.Exception.Message }

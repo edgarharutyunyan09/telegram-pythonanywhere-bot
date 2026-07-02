@@ -58,7 +58,7 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hello:3 ready to get started? \n or how can I help you? :D",
+        "Welcome! I'm your AI tutor, here to explain concepts clearly and help you learn by answering your questions.",
     )
 
 
