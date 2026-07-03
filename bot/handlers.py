@@ -70,6 +70,7 @@ COMMANDS = [
     ("help", "", "show this command list"),
     ("reset", "", "clear conversation history"),
     ("about", "", "about this bot"),
+    ("sha", "", "show the live git commit SHA"),
     ("explain", "<topic>", "clear, step-by-step explanation"),
     ("eli5", "<topic>", "explain like I'm five"),
     ("quiz", "[topic]", "a multiple-choice question"),
@@ -543,6 +544,12 @@ def _handle_session_reply(message, session) -> bool:
         return True
     _clear_session(message.from_user.id)
     return False
+
+
+@bot.message_handler(commands=["sha"], func=is_allowed)
+def cmd_sha(message):
+    sha = COMMIT_SHA or "unknown"
+    bot.send_message(message.chat.id, f"Live SHA: {sha}")
 
 
 if HF_SPACE_ID:
