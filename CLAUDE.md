@@ -8,6 +8,8 @@ This file describes the architecture, conventions, and deployment process for th
 
 A Telegram bot template built for students. It runs on PythonAnywhere's free tier, uses Cerebras (or any OpenAI-compatible API) for AI responses, and a local SQLite file on PA's persistent disk for per-user conversation memory.
 
+It's a **Socratic study-mode tutor**: in normal chat it guides with questions and hints instead of handing over answers, requires a genuine attempt before helping, and only walks through a solution once the student has tried — but still explains *concepts* on request. This behavior lives entirely in `SYSTEM_PROMPT` (`bot/config.py`); the learning commands (`/explain`, `/quiz`, `/practice`, `/hint`, `/feynman`, `/review`) build on it.
+
 **Stack:** Python 3.13 · Flask · pyTelegramBotAPI · OpenAI SDK · SQLite · PythonAnywhere
 
 ---
@@ -28,9 +30,10 @@ telegram-pythonanywhere-bot/
 │   ├── preferences.py    # Per-user provider preference stored via store
 │   ├── history.py        # get/save/clear conversation history via store (graceful degradation)
 │   ├── rate_limit.py     # Per-user daily message rate limiting via store (graceful degradation)
+│   ├── review.py         # Spaced-repetition deck of missed /quiz questions (missed:<id>, Leitner boxes)
 │   ├── dedupe.py         # Drops repeated update_ids when Telegram retries (graceful degradation)
 │   ├── helpers.py        # send_reply(), keep_typing() context manager, should_respond() utilities
-│   └── handlers.py       # All Telegram command and message handlers — add new commands here
+│   └── handlers.py       # Telegram command + message handlers (study-mode tutor) — add new commands here
 ├── tests/
 │   ├── conftest.py       # Mocks env vars and external packages (telebot, openai, flask)
 │   ├── test_ai.py        # ask_ai() orchestration

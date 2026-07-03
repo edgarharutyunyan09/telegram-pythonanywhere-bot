@@ -1,5 +1,5 @@
-"""Tests for the learning commands: /explain, /eli5, /quiz, /practice, /score,
-/skip, plus the shared _ai_reply helper and quiz/practice session routing."""
+"""Tests for the learning commands: /explain, /quiz, /practice, /hint, /feynman,
+/review, /score, /skip, plus the shared _ai_reply helper and session routing."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -248,33 +248,159 @@ def test_cmd_skip_clears_pending_session():
         assert "cleared" in mock_bot.send_message.call_args[0][1].lower()
 
 
-# ── regression: fun commands now respect the rate limit ──────────────────────
+# ── _arg guard ───────────────────────────────────────────────────────────────
 
-def test_joke_respects_rate_limit():
-    """/joke used to call ask_ai unconditionally; it now goes through _ai_reply
-    so the daily rate limit applies."""
+def test_command_with_trailing_space_does_not_crash():
+    """'/explain ' (trailing space, no topic) must not raise IndexError; it
+    should fall through to the usage message via the _arg length guard."""
     with (
-        patch("bot.handlers.is_rate_limited", return_value=True),
+        patch("bot.handlers.is_rate_limited", return_value=False),
         patch("bot.handlers.ask_ai") as mock_ask,
         patch("bot.handlers.bot") as mock_bot,
     ):
-        from bot.handlers import cmd_joke
+        from bot.handlers import cmd_explain
 
-        cmd_joke(make_message(text="/joke"))
+        cmd_explain(make_message(text="/explain "))  # trailing space, no topic
         mock_ask.assert_not_called()
-        assert "daily limit" in mock_bot.send_message.call_args[0][1]
+        assert "Usage" in mock_bot.send_message.call_args[0][1]
 
 
-def test_roast_with_trailing_space_does_not_crash():
-    """'/roast ' (trailing space, no name) used to raise IndexError."""
+# ── /hint ──────────────────────────────────────────────────────────────────
+
+def test_hint_without_session_prompts_to_start():
+    store = FakeStore()
+    with patch("bot.handlers.store", store), patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import cmd_hint
+
+        cmd_hint(make_message(text="/hint"))
+        assert "No problem in progress" in mock_bot.send_message.call_args[0][1]
+
+
+def test_hint_gives_hint_and_increments_counter():
+    session = {"kind": "practice", "data": {"problem": "2/3 + 1/6 = ?"}}
+    store = FakeStore({"session:123": json.dumps(session)})
     with (
+        patch("bot.handlers.store", store),
         patch("bot.handlers.is_rate_limited", return_value=False),
-        patch("bot.handlers.ask_ai", return_value="ok") as mock_ask,
-        patch("bot.handlers.send_reply"),
+        patch("bot.handlers.ask_fresh", return_value="Find a common denominator.") as mock_ask,
         patch("bot.handlers.keep_typing", MagicMock()),
+        patch("bot.handlers.bot") as mock_bot,
+    ):
+        from bot.handlers import cmd_hint
+
+        cmd_hint(make_message(text="/hint"))
+        assert "common denominator" in mock_bot.send_message.call_args[0][1]
+        # The problem and hint count reach the model, and the counter is bumped.
+        assert "2/3 + 1/6" in mock_ask.call_args[0][2]
+        saved = json.loads(store.d["session:123"])
+        assert saved["data"]["hints_given"] == 1
+
+
+# ── /feynman ─────────────────────────────────────────────────────────────────
+
+def test_cmd_feynman_opens_session():
+    store = FakeStore()
+    with patch("bot.handlers.store", store), patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import cmd_feynman
+
+        cmd_feynman(make_message(text="/feynman recursion"))
+        saved = json.loads(store.d["session:123"])
+        assert saved["kind"] == "feynman"
+        assert saved["data"]["concept"] == "recursion"
+        assert "your own words" in mock_bot.send_message.call_args[0][1]
+
+
+def test_feynman_explanation_is_probed_by_ai():
+    session = {"kind": "feynman", "data": {"concept": "recursion"}}
+    store = FakeStore({"session:123": json.dumps(session)})
+    with (
+        patch("bot.handlers.should_respond", return_value=True),
+        patch("bot.handlers.BOT_INFO", MagicMock(username="testbot")),
+        patch("bot.handlers.is_rate_limited", return_value=False),
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.ask_fresh", return_value="Good start! But what stops it?") as mock_ask,
+        patch("bot.handlers.keep_typing", MagicMock()),
+        patch("bot.handlers.send_reply") as mock_send,
         patch("bot.handlers.bot"),
     ):
-        from bot.handlers import cmd_roast
+        from bot.handlers import handle_message
 
-        cmd_roast(make_message(text="/roast "))  # trailing space, no target
-        assert "roast of you" in mock_ask.call_args[0][1]
+        handle_message(make_message(text="a function that calls itself"))
+        assert mock_ask.called
+        probed = mock_ask.call_args[0][2]
+        assert "recursion" in probed and "calls itself" in probed
+        mock_send.assert_called_once()
+        assert "session:123" not in store.d  # consumed
+
+
+# ── /review (spaced repetition) ──────────────────────────────────────────────
+
+def test_quiz_wrong_answer_records_a_miss():
+    session = {"kind": "quiz", "data": VALID_QUIZ}
+    store = FakeStore({"session:123": json.dumps(session)})
+    with (
+        patch("bot.handlers.should_respond", return_value=True),
+        patch("bot.handlers.BOT_INFO", MagicMock(username="testbot")),
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.ask_ai"),
+        patch("bot.handlers.review.record_miss") as mock_record,
+        patch("bot.handlers.bot"),
+    ):
+        from bot.handlers import handle_message
+
+        handle_message(make_message(text="B"))  # wrong (correct is A)
+        mock_record.assert_called_once()
+        assert mock_record.call_args[0][1]["question"] == VALID_QUIZ["question"]
+
+
+def test_review_empty_deck_message():
+    store = FakeStore()
+    with (
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.review.count_items", return_value=0),
+        patch("bot.handlers.bot") as mock_bot,
+    ):
+        from bot.handlers import cmd_review
+
+        cmd_review(make_message(text="/review"))
+        assert "No review items yet" in mock_bot.send_message.call_args[0][1]
+
+
+def test_review_presents_due_item_and_opens_session():
+    store = FakeStore()
+    due_item = {**VALID_QUIZ, "box": 0, "due_at": 0}
+    with (
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.review.count_items", return_value=1),
+        patch("bot.handlers.review.next_due", return_value=due_item),
+        patch("bot.handlers.bot") as mock_bot,
+    ):
+        from bot.handlers import cmd_review
+
+        cmd_review(make_message(text="/review"))
+        assert "len()" in mock_bot.send_message.call_args[0][1]
+        saved = json.loads(store.d["session:123"])
+        assert saved["kind"] == "review"
+
+
+def test_review_answer_reschedules():
+    item = {**VALID_QUIZ, "box": 0, "due_at": 0}
+    session = {"kind": "review", "data": item}
+    store = FakeStore({"session:123": json.dumps(session)})
+    with (
+        patch("bot.handlers.should_respond", return_value=True),
+        patch("bot.handlers.BOT_INFO", MagicMock(username="testbot")),
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.ask_ai") as mock_ask,
+        patch("bot.handlers.review.reschedule", return_value="I'll show this again in 3 days.") as mock_resched,
+        patch("bot.handlers.bot") as mock_bot,
+    ):
+        from bot.handlers import handle_message
+
+        handle_message(make_message(text="A"))  # correct
+        mock_ask.assert_not_called()  # review grading is local
+        mock_resched.assert_called_once()
+        assert mock_resched.call_args[0][2] is True  # correct flag
+        sent = mock_bot.send_message.call_args[0][1]
+        assert "Correct" in sent and "3 days" in sent
+        assert "session:123" not in store.d

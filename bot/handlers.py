@@ -1,6 +1,5 @@
 import json
 import os
-import random
 from datetime import datetime
 from bot.clients import bot, BOT_INFO, store
 from bot.config import (
@@ -11,6 +10,7 @@ from bot.config import (
     RATE_LIMIT,
     SYSTEM_PROMPT,
 )
+from bot import review
 from bot.ai import ask_ai, ask_fresh
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
@@ -58,7 +58,10 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Welcome! I'm your AI tutor, here to explain concepts clearly and help you learn by answering your questions.",
+        "Hi! I'm your study-mode tutor. I won't just hand you answers — I'll ask "
+        "questions and give hints so you actually learn. Ask me anything, or try "
+        "/explain a concept, /practice a problem, /quiz yourself, or /feynman to teach "
+        "it back to me.",
     )
 
 
@@ -68,24 +71,17 @@ def cmd_start(message):
 COMMANDS = [
     ("start", "", "welcome message"),
     ("help", "", "show this command list"),
+    ("explain", "<topic>", "get a concept explained step by step"),
+    ("quiz", "[topic]", "a multiple-choice question"),
+    ("practice", "[subject]", "get a problem to solve"),
+    ("hint", "", "a hint for the current problem"),
+    ("feynman", "<concept>", "explain it back; I find the gaps"),
+    ("review", "", "review questions you've missed"),
+    ("score", "", "your quiz score"),
+    ("skip", "", "leave the current activity"),
     ("reset", "", "clear conversation history"),
     ("about", "", "about this bot"),
     ("sha", "", "show the live git commit SHA"),
-    ("explain", "<topic>", "clear, step-by-step explanation"),
-    ("eli5", "<topic>", "explain like I'm five"),
-    ("quiz", "[topic]", "a multiple-choice question"),
-    ("practice", "[subject]", "get a problem to solve"),
-    ("score", "", "your quiz score"),
-    ("skip", "", "leave the current quiz/practice"),
-    ("joke", "", "one short, clean programming joke"),
-    ("quote", "", "a short motivational line"),
-    ("fact", "", "a short, surprising fact"),
-    ("compliment", "", "brighten someone's day"),
-    ("roast", "[name]", "a short, playful roast"),
-    ("roll", "", "roll a dice (1-6)"),
-    ("remember", "", "save a note"),
-    ("recall", "", "show your saved notes"),
-    ("forget", "", "delete your saved notes"),
 ]
 
 
@@ -119,84 +115,6 @@ def cmd_reset(message):
     bot.send_message(message.chat.id, "Conversation cleared. Starting fresh!")
 
 
-@bot.message_handler(commands=["roll"], func=is_allowed)
-def cmd_roll(message):
-    result = random.randint(1, 6)
-    bot.send_message(message.chat.id, f"You rolled a {result}! 🎲")
-
-
-def _load_notes(user_id: int) -> list:
-    """Return the user's saved notes as a list.
-
-    Notes are stored as a JSON array under note:<user_id>. Older data
-    saved as a bare string is treated as a single-item list so nothing
-    is lost when upgrading from the single-note version.
-    """
-    raw = store.get(f"note:{user_id}")
-    if not raw:
-        return []
-    try:
-        value = json.loads(raw)
-    except (ValueError, TypeError):
-        return [raw]  # legacy single-string note
-    return value if isinstance(value, list) else [value]
-
-
-@bot.message_handler(commands=["remember"], func=is_allowed)
-def cmd_remember(message):
-    parts = message.text.split(maxsplit=1)
-    note = parts[1].strip() if len(parts) > 1 else ""
-    if not note:
-        bot.send_message(message.chat.id, "Usage: /remember <something to save>")
-        return
-    if store is None:
-        bot.send_message(message.chat.id, "Memory isn't available right now.")
-        return
-    try:
-        notes = _load_notes(message.from_user.id)
-        notes.append(note)
-        store.set(f"note:{message.from_user.id}", json.dumps(notes))
-        bot.send_message(
-            message.chat.id, f"Saved! You now have {len(notes)} note(s). Use /recall to see them."
-        )
-    except Exception as e:
-        print(f"Store write error (remember): {e}")
-        bot.send_message(message.chat.id, "Couldn't save that. Try again later.")
-
-
-@bot.message_handler(commands=["recall"], func=is_allowed)
-def cmd_recall(message):
-    if store is None:
-        bot.send_message(message.chat.id, "Memory isn't available right now.")
-        return
-    try:
-        notes = _load_notes(message.from_user.id)
-    except Exception as e:
-        print(f"Store read error (recall): {e}")
-        bot.send_message(message.chat.id, "Couldn't read your notes. Try again later.")
-        return
-    if notes:
-        listed = "\n".join(f"{i}. {n}" for i, n in enumerate(notes, start=1))
-        bot.send_message(message.chat.id, f"You asked me to remember:\n{listed}")
-    else:
-        bot.send_message(
-            message.chat.id, "I don't have anything saved. Use /remember <text>."
-        )
-
-
-@bot.message_handler(commands=["forget"], func=is_allowed)
-def cmd_forget(message):
-    if store is None:
-        bot.send_message(message.chat.id, "Memory isn't available right now.")
-        return
-    try:
-        store.delete(f"note:{message.from_user.id}")
-        bot.send_message(message.chat.id, "Forgotten! Your saved note is gone.")
-    except Exception as e:
-        print(f"Store delete error (forget): {e}")
-        bot.send_message(message.chat.id, "Couldn't forget that. Try again later.")
-
-
 @bot.message_handler(commands=["about"], func=is_allowed)
 def cmd_about(message):
     if HF_SPACE_ID:
@@ -224,7 +142,7 @@ def cmd_about(message):
 # indicator, long-message splitting, and error handling as the main chat handler
 # — instead of each command re-implementing (and forgetting) those.
 
-SESSION_TTL = 3600  # a pending /quiz or /practice expires after 1 hour
+SESSION_TTL = 3600  # a pending activity (quiz/practice/feynman/review) expires after 1 hour
 QUIZ_SYSTEM = (
     "You are a quiz generator for a student. Produce ONE multiple-choice question "
     "on the given topic. Respond with ONLY a compact JSON object — no markdown, no "
@@ -239,10 +157,23 @@ PRACTICE_SYSTEM = (
     "do NOT reveal the solution or the answer. Keep it to a few sentences."
 )
 GRADE_SYSTEM = (
-    "You are a patient tutor grading a student's answer to a practice problem. Say "
-    "clearly whether they are right. If wrong, gently point out the mistake and guide "
-    "them toward the correct approach without simply handing over the answer. Keep it "
-    "brief and encouraging."
+    "You are a patient tutor grading a student's genuine attempt at a practice problem. "
+    "Say clearly whether they are right. If they are wrong, gently point out the mistake, "
+    "then — since they have already tried — walk them through the correct approach so "
+    "they can learn from it. Keep it brief and encouraging."
+)
+HINT_SYSTEM = (
+    "You are a tutor giving a hint for a problem the student is working on. Given the "
+    "problem and how many hints they have already received, give the NEXT hint — more "
+    "specific than any before it, but NEVER the full answer or the final step that gives "
+    "it away. One or two sentences."
+)
+FEYNMAN_SYSTEM = (
+    "You are a tutor using the Feynman technique. The student will try to explain a "
+    "concept in their own words. Affirm what they got right, then point out the gaps, "
+    "vague spots, or misconceptions and ask one or two probing questions that push them "
+    "to fill those gaps. Don't just lecture the full explanation. Keep it brief and "
+    "encouraging."
 )
 
 
@@ -250,7 +181,7 @@ def _arg(message) -> str:
     """Return the text after the command word, or '' if none.
 
     Guarding the split length avoids the IndexError a bare command with a
-    trailing space (e.g. ``/roast ``) would otherwise raise.
+    trailing space (e.g. ``/feynman ``) would otherwise raise.
     """
     parts = (message.text or "").split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
@@ -281,7 +212,7 @@ def _ai_reply(message, prompt: str) -> None:
         _log(message, "out", f"[error] {e}")
 
 
-# ── Quiz / practice session state (stored via the KV store) ───────────────────
+# ── Activity session state (stored via the KV store) ──────────────────────────
 
 def _get_session(user_id: int):
     """Return the user's pending {'kind', 'data'} session, or None."""
@@ -395,19 +326,6 @@ def cmd_explain(message):
     )
 
 
-@bot.message_handler(commands=["eli5"], func=is_allowed)
-def cmd_eli5(message):
-    topic = _arg(message)
-    if not topic:
-        bot.send_message(message.chat.id, "Usage: /eli5 <topic> — e.g. /eli5 recursion")
-        return
-    _ai_reply(
-        message,
-        "Explain this to a complete beginner in the simplest possible terms, using a "
-        f"short everyday analogy: {topic}",
-    )
-
-
 @bot.message_handler(commands=["quiz"], func=is_allowed)
 def cmd_quiz(message):
     if store is None:
@@ -432,7 +350,7 @@ def cmd_quiz(message):
     body = (
         f"❓ {quiz['question']}\n\n"
         + "\n".join(f"{k}) {opts[k]}" for k in ("A", "B", "C", "D"))
-        + "\n\nReply A, B, C, or D. (/skip to leave the quiz)"
+        + "\n\nReply A, B, C, or D. (/hint for a hint, /skip to leave)"
     )
     bot.send_message(message.chat.id, body)
     _log(message, "out", body)
@@ -460,7 +378,102 @@ def cmd_practice(message):
         bot.send_message(message.chat.id, "I couldn't build a problem on that. Try a different subject.")
         return
     _set_session(message.from_user.id, "practice", {"problem": problem})
-    body = f"📝 {problem}\n\nReply with your answer and I'll check it. (/skip to give up)"
+    body = f"📝 {problem}\n\nReply with your answer and I'll check it. (/hint for a hint, /skip to give up)"
+    bot.send_message(message.chat.id, body)
+    _log(message, "out", body)
+
+
+@bot.message_handler(commands=["hint"], func=is_allowed)
+def cmd_hint(message):
+    session = _get_session(message.from_user.id)
+    if not session:
+        bot.send_message(
+            message.chat.id, "No problem in progress. Start one with /practice or /quiz."
+        )
+        return
+    kind = session.get("kind")
+    data = session.get("data") or {}
+    if kind not in ("practice", "quiz", "review"):
+        bot.send_message(message.chat.id, "There's nothing to hint on right now.")
+        return
+    if _rate_limited_notice(message):
+        return
+    hints_given = int(data.get("hints_given", 0))
+    if kind == "practice":
+        problem = data.get("problem", "")
+    else:  # quiz / review — include the options so the hint can narrow them down
+        opts = data.get("options", {})
+        problem = data.get("question", "") + "\nOptions: " + "; ".join(
+            f"{k}) {opts.get(k, '')}" for k in ("A", "B", "C", "D")
+        )
+    prompt = f"Problem:\n{problem}\n\nHints already given: {hints_given}. Give the next hint."
+    try:
+        with keep_typing(message.chat.id):
+            hint = ask_fresh(message.from_user.id, HINT_SYSTEM, prompt)
+    except Exception as e:
+        print(f"Hint generation error: {e}")
+        bot.send_message(message.chat.id, "Couldn't come up with a hint. Please try again.")
+        return
+    data["hints_given"] = hints_given + 1
+    _set_session(message.from_user.id, kind, data)
+    body = f"💡 {(hint or '').strip()}"
+    bot.send_message(message.chat.id, body)
+    _log(message, "out", body)
+
+
+@bot.message_handler(commands=["feynman"], func=is_allowed)
+def cmd_feynman(message):
+    if store is None:
+        bot.send_message(
+            message.chat.id, "Feynman mode needs memory, which isn't available right now."
+        )
+        return
+    concept = _arg(message)
+    if not concept:
+        bot.send_message(
+            message.chat.id,
+            "Usage: /feynman <concept> — e.g. /feynman how recursion works. "
+            "Then explain it to me in your own words.",
+        )
+        return
+    _set_session(message.from_user.id, "feynman", {"concept": concept})
+    body = (
+        f'🧑‍🏫 Explain "{concept}" in your own words, as if you\'re teaching a '
+        "beginner. I'll point out the gaps. (/skip to leave)"
+    )
+    bot.send_message(message.chat.id, body)
+    _log(message, "out", body)
+
+
+@bot.message_handler(commands=["review"], func=is_allowed)
+def cmd_review(message):
+    if store is None:
+        bot.send_message(message.chat.id, "Review needs memory, which isn't available right now.")
+        return
+    user_id = message.from_user.id
+    total = review.count_items(user_id)
+    if total == 0:
+        bot.send_message(
+            message.chat.id,
+            "No review items yet. You build your review deck by missing /quiz "
+            "questions — getting things wrong is how you learn!",
+        )
+        return
+    item = review.next_due(user_id)
+    if item is None:
+        bot.send_message(
+            message.chat.id,
+            f"Nothing due for review right now 🎉 You have {total} item(s) scheduled; "
+            "check back later.",
+        )
+        return
+    _set_session(user_id, "review", item)
+    opts = item["options"]
+    body = (
+        f"🔁 Review — {item['question']}\n\n"
+        + "\n".join(f"{k}) {opts.get(k, '')}" for k in ("A", "B", "C", "D"))
+        + "\n\nReply A, B, C, or D. (/hint for a hint, /skip to leave)"
+    )
     bot.send_message(message.chat.id, body)
     _log(message, "out", body)
 
@@ -503,6 +516,8 @@ def _handle_quiz_answer(message, quiz) -> None:
         head = f"✅ Correct — {correct}) {quiz['options'][correct]}"
     else:
         head = f"❌ Not quite. You chose {choice}; the answer is {correct}) {quiz['options'][correct]}"
+        # Log the miss so it resurfaces later via /review (spaced repetition).
+        review.record_miss(message.from_user.id, quiz)
     expl = quiz.get("explanation", "")
     body = head + (f"\n\n{expl}" if expl else "") + f"\n\nScore: {got}/{total} — next? /quiz"
     bot.send_message(message.chat.id, body)
@@ -528,8 +543,45 @@ def _handle_practice_answer(message, data) -> None:
         bot.send_message(message.chat.id, "Something went wrong grading that. Please try again.")
 
 
+def _handle_feynman_answer(message, data) -> None:
+    if _rate_limited_notice(message):
+        return
+    _clear_session(message.from_user.id)
+    prompt = (
+        f"Concept: {data.get('concept', '')}\n\n"
+        f"The student's explanation:\n\n{message.text}"
+    )
+    try:
+        with keep_typing(message.chat.id):
+            reply = ask_fresh(message.from_user.id, FEYNMAN_SYSTEM, prompt)
+        send_reply(message, reply)
+        _log(message, "out", reply)
+    except Exception as e:
+        print(f"Feynman feedback error: {e}")
+        bot.send_message(message.chat.id, "Something went wrong. Please try again.")
+
+
+def _handle_review_answer(message, item) -> None:
+    choice = _extract_choice(message.text)
+    if choice is None:
+        bot.send_message(message.chat.id, "Reply with A, B, C, or D — or /skip to leave review.")
+        return
+    _clear_session(message.from_user.id)
+    correct = item["correct"]
+    is_right = choice == correct
+    when = review.reschedule(message.from_user.id, item, is_right)
+    if is_right:
+        head = f"✅ Correct — {correct}) {item['options'][correct]}"
+    else:
+        head = f"❌ Not quite. The answer is {correct}) {item['options'][correct]}"
+    expl = item.get("explanation", "")
+    body = head + (f"\n\n{expl}" if expl else "") + (f"\n\n{when}" if when else "")
+    bot.send_message(message.chat.id, body)
+    _log(message, "out", body)
+
+
 def _handle_session_reply(message, session) -> bool:
-    """Route a message that answers a pending /quiz or /practice.
+    """Route a message that answers a pending activity (quiz/practice/feynman/review).
 
     Returns True if the message was consumed by a session, False if the session
     was unrecognized (dropped) and the message should fall through to chat.
@@ -541,6 +593,12 @@ def _handle_session_reply(message, session) -> bool:
         return True
     if kind == "practice":
         _handle_practice_answer(message, data)
+        return True
+    if kind == "feynman":
+        _handle_feynman_answer(message, data)
+        return True
+    if kind == "review":
+        _handle_review_answer(message, data)
         return True
     _clear_session(message.from_user.id)
     return False
@@ -590,36 +648,6 @@ if HF_SPACE_ID:
             bot.send_message(message.chat.id, "Switched to Main Provider.")
 
 
-# Fun commands — registered on every install (they only need the main AI, not
-# HF) and routed through _ai_reply so they share the rate limiting, typing
-# indicator, and error handling of the main chat handler.
-
-@bot.message_handler(commands=["joke"], func=is_allowed)
-def cmd_joke(message):
-    _ai_reply(message, "Tell one short, clean programming joke.")
-
-
-@bot.message_handler(commands=["quote"], func=is_allowed)
-def cmd_quote(message):
-    _ai_reply(message, "Give one short, original motivational line.")
-
-
-@bot.message_handler(commands=["fact"], func=is_allowed)
-def cmd_fact(message):
-    _ai_reply(message, "Tell one short, surprising fact.")
-
-
-@bot.message_handler(commands=["compliment"], func=is_allowed)
-def cmd_compliment(message):
-    _ai_reply(message, "Give one short, warm, genuine compliment.")
-
-
-@bot.message_handler(commands=["roast"], func=is_allowed)
-def cmd_roast(message):
-    name = _arg(message) or "you"
-    _ai_reply(message, f"Write a short, playful, friendly roast of {name}.")
-
-
 @bot.message_handler(content_types=["text"], func=is_allowed)
 def handle_message(message):
     if not should_respond(message):
@@ -630,10 +658,9 @@ def handle_message(message):
         # arrive with no usable text. Don't burn rate-limit / AI calls on them.
         return
     _log(message, "in", text)
-    # If the user has a pending /quiz or /practice, this message answers it.
+    # If the user has a pending activity (quiz/practice/feynman/review), this
+    # message answers it.
     session = _get_session(message.from_user.id)
     if session and _handle_session_reply(message, session):
         return
     _ai_reply(message, text)
-
-

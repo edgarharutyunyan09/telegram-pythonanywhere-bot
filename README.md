@@ -442,14 +442,32 @@ make deploy-pa  # one-command PythonAnywhere deploy (see "Fast path" in Part 2)
 
 ## Bot commands
 
+The bot runs in **study mode**: in normal chat it guides you with questions and hints
+instead of handing over answers, asks you to attempt a problem first, and only walks you
+through a solution once you've genuinely tried. It still explains *concepts* directly when
+you ask. This is set entirely by `SYSTEM_PROMPT` in `bot/config.py`.
+
 | Command | Description |
 |---|---|
 | `/start` | Welcome message |
 | `/help` | List all commands |
+| `/explain <topic>` | Get a concept explained step by step |
+| `/quiz [topic]` | Get a multiple-choice question |
+| `/practice [subject]` | Get a problem to solve (reply with your answer to be graded) |
+| `/hint` | Get a hint for the current problem — more specific each time, never the full answer |
+| `/feynman <concept>` | Explain a concept back in your own words; the bot probes the gaps |
+| `/review` | Review questions you've missed, on a spaced-repetition schedule |
+| `/score` | Show your running quiz score |
+| `/skip` | Leave the current activity |
 | `/reset` | Clear your conversation history |
 | `/about` | Show model, storage, and hosting info |
 | `/sha` | Show the live git commit SHA |
 | `/model` | Switch AI provider (only available when `HF_SPACE_ID` is set) |
+
+`/quiz`, `/practice`, `/feynman`, and `/review` need storage (`SQLITE_PATH`) — they're
+disabled in stateless mode. Missed `/quiz` questions are logged under `missed:<user_id>` and
+resurfaced by `/review` using a Leitner-box schedule (`bot/review.py`). Review is pull-based
+(run `/review` when you want) since PythonAnywhere's free tier has no scheduler.
 
 ---
 
