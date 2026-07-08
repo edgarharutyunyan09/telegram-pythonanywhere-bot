@@ -13,7 +13,7 @@ from bot.config import (
 from bot import review
 from bot.ai import ask_ai, ask_fresh
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
-from bot.history import clear_history
+from bot.history import clear_history, get_history
 from bot.preferences import get_provider, set_provider
 from bot.rate_limit import is_rate_limited
 
@@ -61,7 +61,7 @@ def cmd_start(message):
         "Hi! I'm your study-mode tutor. I won't just hand you answers — I'll ask "
         "questions and give hints so you actually learn. Ask me anything, or try "
         "/explain a concept, /practice a problem, /quiz yourself, or /feynman to teach "
-        "it back to me.",
+        "it back to me. Not sure where to start? /choose and I'll suggest a topic.",
     )
 
 
@@ -71,6 +71,7 @@ def cmd_start(message):
 COMMANDS = [
     ("start", "", "welcome message"),
     ("help", "", "show this command list"),
+    ("choose", "", "answer a few questions; I'll suggest what to learn"),
     ("explain", "<topic>", "get a concept explained step by step"),
     ("quiz", "[topic]", "a multiple-choice question"),
     ("practice", "[subject]", "get a problem to solve"),
@@ -142,7 +143,7 @@ def cmd_about(message):
 # indicator, long-message splitting, and error handling as the main chat handler
 # — instead of each command re-implementing (and forgetting) those.
 
-SESSION_TTL = 3600  # a pending activity (quiz/practice/feynman/review) expires after 1 hour
+SESSION_TTL = 3600  # a pending activity (quiz/practice/feynman/review/choose) expires after 1 hour
 QUIZ_SYSTEM = (
     "You are a quiz generator for a student. Produce ONE multiple-choice question "
     "on the given topic. Respond with ONLY a compact JSON object — no markdown, no "
@@ -174,6 +175,23 @@ FEYNMAN_SYSTEM = (
     "vague spots, or misconceptions and ask one or two probing questions that push them "
     "to fill those gaps. Don't just lecture the full explanation. Keep it brief and "
     "encouraging."
+)
+# /choose walks the student through a few fixed questions (no AI per step), then
+# makes ONE AI call over their answers to recommend a topic to start learning.
+CHOOSE_QUESTIONS = [
+    "What subject area are you most drawn to right now? (e.g. math, coding, "
+    "science, history, languages, art)",
+    "How familiar are you with it already — brand new, know the basics, or "
+    "fairly comfortable?",
+    "What's your main goal — pass a test, build or make something, satisfy "
+    "curiosity, or something else?",
+]
+CHOOSE_SYSTEM = (
+    "You are a friendly learning advisor for a student. Based on the student's answers "
+    "to a few questions about their interests, current level, and goals, recommend ONE "
+    "specific, well-scoped topic for them to start learning next. Explain in one or two "
+    "sentences why it fits them, then suggest they try it with /explain <topic> or "
+    "/quiz <topic>. Keep it brief, concrete, and encouraging."
 )
 
 
@@ -299,6 +317,30 @@ def _parse_quiz(raw: str):
     }
 
 
+def _recent_context(user_id: int, max_turns: int = 6, max_chars: int = 1500) -> str:
+    """Summarize the tail of the user's chat history for topic inference.
+
+    Returns a compact transcript of the last few turns so a bare /quiz can be
+    steered toward what the student has just been studying (via /explain or
+    normal chat). Returns '' when there's no usable history — stateless mode or
+    a fresh conversation — so the caller can fall back to a generic topic.
+    """
+    history = get_history(user_id)
+    if not history:
+        return ""
+    lines = []
+    for turn in history[-max_turns:]:
+        role = "Student" if turn.get("role") == "user" else "Tutor"
+        content = (turn.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    text = "\n".join(lines).strip()
+    if len(text) > max_chars:
+        # Keep the most recent characters — the latest turn is the best signal.
+        text = text[-max_chars:]
+    return text
+
+
 def _extract_choice(text: str):
     """Map a quiz reply to 'A'..'D', accepting a letter or the digits 1-4."""
     t = (text or "").strip().upper()
@@ -333,10 +375,25 @@ def cmd_quiz(message):
         return
     if _rate_limited_notice(message):
         return
-    topic = _arg(message) or "general knowledge"
+    topic = _arg(message)
+    if topic:
+        quiz_input = f"Topic: {topic}"
+    else:
+        # No explicit topic: quiz on whatever the student has just been
+        # studying rather than firing off random trivia. Fall back to a
+        # generic topic only when there's no conversation to draw on.
+        context = _recent_context(message.from_user.id)
+        if context:
+            quiz_input = (
+                "Pick the main subject the student has most recently been "
+                "studying in the conversation below and write the question on "
+                "that subject:\n\n" + context
+            )
+        else:
+            quiz_input = "Topic: general knowledge"
     try:
         with keep_typing(message.chat.id):
-            raw = ask_fresh(message.from_user.id, QUIZ_SYSTEM, f"Topic: {topic}")
+            raw = ask_fresh(message.from_user.id, QUIZ_SYSTEM, quiz_input)
         quiz = _parse_quiz(raw)
     except Exception as e:
         print(f"Quiz generation error: {e}")
@@ -440,6 +497,22 @@ def cmd_feynman(message):
     body = (
         f'🧑‍🏫 Explain "{concept}" in your own words, as if you\'re teaching a '
         "beginner. I'll point out the gaps. (/skip to leave)"
+    )
+    bot.send_message(message.chat.id, body)
+    _log(message, "out", body)
+
+
+@bot.message_handler(commands=["choose"], func=is_allowed)
+def cmd_choose(message):
+    if store is None:
+        bot.send_message(
+            message.chat.id, "Choosing a topic needs memory, which isn't available right now."
+        )
+        return
+    _set_session(message.from_user.id, "choose", {"step": 0, "answers": []})
+    body = (
+        "Let's find a good topic for you! I'll ask a few quick questions.\n\n"
+        f"1/{len(CHOOSE_QUESTIONS)} — {CHOOSE_QUESTIONS[0]}\n\n(/skip to leave)"
     )
     bot.send_message(message.chat.id, body)
     _log(message, "out", body)
@@ -561,6 +634,36 @@ def _handle_feynman_answer(message, data) -> None:
         bot.send_message(message.chat.id, "Something went wrong. Please try again.")
 
 
+def _handle_choose_answer(message, data) -> None:
+    """Record an answer to the /choose questionnaire, then ask the next question
+    or — once all are answered — make one AI call to recommend a topic."""
+    answers = list(data.get("answers", []))
+    answers.append((message.text or "").strip())
+    if len(answers) < len(CHOOSE_QUESTIONS):
+        step = len(answers)  # index of the next unanswered question
+        _set_session(message.from_user.id, "choose", {"step": step, "answers": answers})
+        body = (
+            f"{step + 1}/{len(CHOOSE_QUESTIONS)} — {CHOOSE_QUESTIONS[step]}\n\n(/skip to leave)"
+        )
+        bot.send_message(message.chat.id, body)
+        _log(message, "out", body)
+        return
+    # All questions answered — recommend a topic. Check the rate limit before
+    # clearing so a limited student keeps their session and can finish later.
+    if _rate_limited_notice(message):
+        return
+    _clear_session(message.from_user.id)
+    qa = "\n".join(f"Q: {q}\nA: {a}" for q, a in zip(CHOOSE_QUESTIONS, answers))
+    try:
+        with keep_typing(message.chat.id):
+            reply = ask_fresh(message.from_user.id, CHOOSE_SYSTEM, qa)
+        send_reply(message, reply)
+        _log(message, "out", reply)
+    except Exception as e:
+        print(f"Topic recommendation error: {e}")
+        bot.send_message(message.chat.id, "Something went wrong picking a topic. Please try again.")
+
+
 def _handle_review_answer(message, item) -> None:
     choice = _extract_choice(message.text)
     if choice is None:
@@ -581,7 +684,7 @@ def _handle_review_answer(message, item) -> None:
 
 
 def _handle_session_reply(message, session) -> bool:
-    """Route a message that answers a pending activity (quiz/practice/feynman/review).
+    """Route a message that answers a pending activity (quiz/practice/feynman/review/choose).
 
     Returns True if the message was consumed by a session, False if the session
     was unrecognized (dropped) and the message should fall through to chat.
@@ -596,6 +699,9 @@ def _handle_session_reply(message, session) -> bool:
         return True
     if kind == "feynman":
         _handle_feynman_answer(message, data)
+        return True
+    if kind == "choose":
+        _handle_choose_answer(message, data)
         return True
     if kind == "review":
         _handle_review_answer(message, data)

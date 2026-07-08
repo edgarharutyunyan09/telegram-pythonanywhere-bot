@@ -8,7 +8,7 @@ This file describes the architecture, conventions, and deployment process for th
 
 A Telegram bot template built for students. It runs on PythonAnywhere's free tier, uses Cerebras (or any OpenAI-compatible API) for AI responses, and a local SQLite file on PA's persistent disk for per-user conversation memory.
 
-It's a **Socratic study-mode tutor**: in normal chat it guides with questions and hints instead of handing over answers, requires a genuine attempt before helping, and only walks through a solution once the student has tried — but still explains *concepts* on request. This behavior lives entirely in `SYSTEM_PROMPT` (`bot/config.py`); the learning commands (`/explain`, `/quiz`, `/practice`, `/hint`, `/feynman`, `/review`) build on it.
+It's a **Socratic study-mode tutor**: in normal chat it guides with questions and hints instead of handing over answers, requires a genuine attempt before helping, and only walks through a solution once the student has tried — but still explains *concepts* on request. This behavior lives entirely in `SYSTEM_PROMPT` (`bot/config.py`); the learning commands (`/choose`, `/explain`, `/quiz`, `/practice`, `/hint`, `/feynman`, `/review`) build on it.
 
 **Stack:** Python 3.13 · Flask · pyTelegramBotAPI · OpenAI SDK · SQLite · PythonAnywhere
 

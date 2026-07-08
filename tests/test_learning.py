@@ -111,6 +111,46 @@ def test_cmd_quiz_generates_and_stores_session():
         assert saved["data"]["correct"] == "A"
 
 
+def test_cmd_quiz_without_topic_uses_recent_conversation():
+    """A bare /quiz should quiz on what the student was just studying, drawing
+    the topic from recent chat history instead of firing random trivia."""
+    store = FakeStore()
+    history = [
+        {"role": "user", "content": "Explain photosynthesis"},
+        {"role": "assistant", "content": "Photosynthesis is how plants make food..."},
+    ]
+    with (
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.is_rate_limited", return_value=False),
+        patch("bot.handlers.get_history", return_value=history),
+        patch("bot.handlers.ask_fresh", return_value=json.dumps(VALID_QUIZ)) as mock_ask,
+        patch("bot.handlers.keep_typing", MagicMock()),
+        patch("bot.handlers.bot"),
+    ):
+        from bot.handlers import cmd_quiz
+
+        cmd_quiz(make_message(text="/quiz"))  # no topic
+        quiz_input = mock_ask.call_args[0][2]
+        assert "photosynthesis" in quiz_input.lower()
+
+
+def test_cmd_quiz_without_topic_or_history_falls_back_to_general():
+    """With no topic and no history, /quiz still works via a generic topic."""
+    store = FakeStore()
+    with (
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.is_rate_limited", return_value=False),
+        patch("bot.handlers.get_history", return_value=[]),
+        patch("bot.handlers.ask_fresh", return_value=json.dumps(VALID_QUIZ)) as mock_ask,
+        patch("bot.handlers.keep_typing", MagicMock()),
+        patch("bot.handlers.bot"),
+    ):
+        from bot.handlers import cmd_quiz
+
+        cmd_quiz(make_message(text="/quiz"))
+        assert "general knowledge" in mock_ask.call_args[0][2].lower()
+
+
 def test_cmd_quiz_handles_unparseable_response():
     store = FakeStore()
     with (
@@ -331,6 +371,70 @@ def test_feynman_explanation_is_probed_by_ai():
         assert "recursion" in probed and "calls itself" in probed
         mock_send.assert_called_once()
         assert "session:123" not in store.d  # consumed
+
+
+# ── /choose (topic recommender) ──────────────────────────────────────────────
+
+def test_cmd_choose_starts_session_and_asks_first_question():
+    store = FakeStore()
+    with patch("bot.handlers.store", store), patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import cmd_choose, CHOOSE_QUESTIONS
+
+        cmd_choose(make_message(text="/choose"))
+        saved = json.loads(store.d["session:123"])
+        assert saved["kind"] == "choose"
+        assert saved["data"] == {"step": 0, "answers": []}
+        assert CHOOSE_QUESTIONS[0] in mock_bot.send_message.call_args[0][1]
+
+
+def test_choose_answer_advances_to_next_question_without_ai():
+    from bot.handlers import CHOOSE_QUESTIONS
+
+    session = {"kind": "choose", "data": {"step": 0, "answers": []}}
+    store = FakeStore({"session:123": json.dumps(session)})
+    with (
+        patch("bot.handlers.should_respond", return_value=True),
+        patch("bot.handlers.BOT_INFO", MagicMock(username="testbot")),
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.ask_fresh") as mock_ask,
+        patch("bot.handlers.bot") as mock_bot,
+    ):
+        from bot.handlers import handle_message
+
+        handle_message(make_message(text="coding"))
+        mock_ask.assert_not_called()  # no AI call until the final answer
+        saved = json.loads(store.d["session:123"])
+        assert saved["data"]["answers"] == ["coding"]
+        assert saved["data"]["step"] == 1
+        assert CHOOSE_QUESTIONS[1] in mock_bot.send_message.call_args[0][1]
+
+
+def test_choose_final_answer_recommends_topic_and_clears():
+    from bot.handlers import CHOOSE_QUESTIONS
+
+    n = len(CHOOSE_QUESTIONS)
+    prior = [f"answer{i}" for i in range(n - 1)]  # all but the last answered
+    session = {"kind": "choose", "data": {"step": n - 1, "answers": prior}}
+    store = FakeStore({"session:123": json.dumps(session)})
+    with (
+        patch("bot.handlers.should_respond", return_value=True),
+        patch("bot.handlers.BOT_INFO", MagicMock(username="testbot")),
+        patch("bot.handlers.is_rate_limited", return_value=False),
+        patch("bot.handlers.store", store),
+        patch("bot.handlers.ask_fresh", return_value="Try Python basics! /explain variables") as mock_ask,
+        patch("bot.handlers.keep_typing", MagicMock()),
+        patch("bot.handlers.send_reply") as mock_send,
+        patch("bot.handlers.bot"),
+    ):
+        from bot.handlers import handle_message
+
+        handle_message(make_message(text="build a game"))
+        assert mock_ask.called
+        qa = mock_ask.call_args[0][2]
+        assert "build a game" in qa  # the final answer reaches the model
+        assert CHOOSE_QUESTIONS[0] in qa  # questions are included for context
+        mock_send.assert_called_once()
+        assert "session:123" not in store.d  # session consumed
 
 
 # ── /review (spaced repetition) ──────────────────────────────────────────────
